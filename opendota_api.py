@@ -48,42 +48,103 @@ def save_match(match_data, radiant_pick, dire_pick):
     with open(file_path, "x", encoding="utf-8") as file:
         json.dump(data, file, indent=4)
 
+
 def collect_matches():
     folder = Path("data/processed")
     folder.mkdir(parents=True, exist_ok=True)
+
     MAX_MATCHES = 1000
     url = "https://api.opendota.com/api/proMatches"
-    try:
-        respo = requests.get(url, timeout=30)
-        respo.raise_for_status()
-        matches = respo.json()
 
-    except requests.exceptions.RequestException as error:
-        print(f"Ошибка OpenDota API: {error}")
-        return
     saved_total = len(list(folder.glob("*.json")))
-    for match in matches:
-        if saved_total >= MAX_MATCHES:
-            print(f"[DONE] Достигнут лимит: {MAX_MATCHES} матчей")
-            break
-        match_id = match.get("match_id")
+    oldest_match_id = None
 
-        file_path = Path("data/processed") / f"{match_id}.json"
-        if file_path.exists():
-            continue
+    while saved_total < MAX_MATCHES:
+        params = {}
+
+        if oldest_match_id is not None:
+            params["less_than_match_id"] = oldest_match_id
+
+        # Получаем очередную порцию профессиональных матчей
         try:
-            match_data = fetch_match(match_id)
+            time.sleep(2)
+            response = requests.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            matches = response.json()
+
+        except requests.exceptions.HTTPError as error:
+            if error.response is not None and error.response.status_code == 429:
+                print("[LIMIT] Достигнут лимит OpenDota API")
+            else:
+                print(f"[ERROR] Ошибка получения списка матчей: {error}")
+            break
 
         except requests.exceptions.RequestException as error:
-            print(f"[ERROR] Матч {match_id}: {error}")
-            continue
-        pair = extract_match(match_data)
-        if pair is None:
-            continue
-        radiant_pick, dire_pick = pair
-        save_match(match_data, radiant_pick, dire_pick)
-        saved_total += 1
-        print(f"[SUCCESS] Матч {match_id} успешно обработан и сохранён!")
+            print(f"[ERROR] Ошибка OpenDota API: {error}")
+            break
+
+        if not matches:
+            print("[DONE] Больше матчей не найдено")
+            break
+
+        # Запоминаем границу для следующей порции
+        next_oldest_id = min(match["match_id"] for match in matches)
+
+        if oldest_match_id is not None and next_oldest_id >= oldest_match_id:
+            print("[ERROR] Пагинация не продвигается")
+            break
+
+        oldest_match_id = next_oldest_id
+
+        print(f"[INFO] Получено матчей: {len(matches)}")
+        print(f"[INFO] Следующая граница: {oldest_match_id}")
+
+        for match in matches:
+            if saved_total >= MAX_MATCHES:
+                break
+
+            match_id = match.get("match_id")
+
+            if match_id is None:
+                continue
+
+            file_path = folder / f"{match_id}.json"
+
+            if file_path.exists():
+                continue
+
+            try:
+                match_data = fetch_match(match_id)
+
+            except requests.exceptions.HTTPError as error:
+                if error.response is not None and error.response.status_code == 429:
+                    print("[LIMIT] Достигнут лимит OpenDota API")
+                    print(f"[DONE] Всего сохранено матчей: {saved_total}/{MAX_MATCHES}")
+                    return
+
+                print(f"[ERROR] Матч {match_id}: {error}")
+                continue
+
+            except requests.exceptions.RequestException as error:
+                print(f"[ERROR] Матч {match_id}: {error}")
+                continue
+
+            pair = extract_match(match_data)
+
+            if pair is None:
+                continue
+
+            radiant_pick, dire_pick = pair
+
+            save_match(match_data, radiant_pick, dire_pick)
+            saved_total += 1
+
+            print(
+                f"[SUCCESS] Матч {match_id} сохранён! "
+                f"[{saved_total}/{MAX_MATCHES}]"
+            )
+
+    print(f"[DONE] Всего сохранено матчей: {saved_total}/{MAX_MATCHES}")
 
 if __name__ == "__main__":
     collect_matches()
